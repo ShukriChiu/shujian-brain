@@ -19,48 +19,53 @@
 git clone https://github.com/xxx/shujian-brain.git my-brain
 cd my-brain
 
-# 2. 配置环境
-cp .env.example .env
-# 编辑 .env：填入你的 BRAIN_PROFILE、数据库连接、API key
+# 2. 把 my-brain/ 加入你的 Cursor workspace
+# 3. 开始对话 — AI 会自动触发 Onboarding，手把手引导你完成设置
+#    包括：创建 Supabase 数据库 → 配置 .env → 初始化建表 → 生成 AGENTS.md
+# 4. 全程不需要你查文档或手动跑命令
+```
 
-# 3. 把 my-brain/ 加入你的 IDE workspace
-# 4. 开始对话 — AI 会自动检测到未初始化，自动创建你的大脑
-# 5. 不需要手动跑任何命令
+如果你更喜欢手动设置：
+
+```bash
+cp .env.example .env              # 复制配置模板
+# 编辑 .env：填入 BRAIN_PROFILE、BRAIN_DATABASE_URI
+python3 .agents/skills/brain-identity/scripts/brain_identity.py init
+python3 .agents/skills/brain-identity/scripts/brain_identity.py setup  # 验证
 ```
 
 ## 架构
 
 ```
 my-brain/
-├── AGENTS.md              ← 自动生成，AI 每次对话加载
-├── .env                   ← 你的配置（gitignore）
-├── .env.example           ← 配置模板
-├── schema/                ← 数据库迁移文件
-│   ├── 001_brain_schema.sql
-│   ├── 002_brain_support.sql
-│   ├── 003_brain_functions.sql
-│   └── 004_brain_cron.sql
+├── AGENTS.md                  ← 自动生成，AI 每次对话加载
+├── .env                       ← 你的配置（gitignore）
+├── .env.example               ← 配置模板
+├── schema/                    ← 数据库迁移文件（init 自动执行）
+├── supabase/functions/embed/  ← Embedding Edge Function（可选，语义搜索）
 └── .agents/skills/
-    ├── brain-identity/    ← AGENTS.md 生成器
+    ├── brain-identity/        ← AGENTS.md 生成器 + Onboarding 引导
     │   ├── scripts/brain_identity.py
-    │   └── templates/     ← 7 个章节模板
-    ├── brain-memory/      ← 长期记忆 + 知识获取
+    │   ├── templates/         ← 7 个章节模板
+    │   └── references/        ← Onboarding 详细步骤
+    ├── brain-memory/          ← 长期记忆 + 知识获取
     │   └── scripts/brain_db.py
-    └── brain-soul/        ← 情绪 + 人格系统
+    └── brain-soul/            ← 情绪 + 人格系统
 ```
 
 ## 三个 Skills
 
-### brain-identity — 身份管理
+### brain-identity — 身份管理 + Onboarding
 
-AGENTS.md 的生成器。从数据库查询身份信息 + 模板，生成 AI 每次对话加载的上下文。
+AGENTS.md 的生成器。首次使用时引导用户完成全部设置。
 
 ```bash
-brain_identity.py init          # 初始化新大脑
-brain_identity.py generate      # 重新生成 AGENTS.md
-brain_identity.py update <section> "内容"  # 更新某章节
-brain_identity.py synthesize    # 从碎片记忆合成身份
-brain_identity.py sections      # 查看各章节状态
+brain_identity.py setup                    # 环境检查（逐项验证）
+brain_identity.py init                     # 初始化（建表 + 生成 AGENTS.md）
+brain_identity.py generate                 # 重新生成 AGENTS.md
+brain_identity.py update <section> "内容"   # 更新某章节
+brain_identity.py synthesize               # 从碎片记忆合成身份
+brain_identity.py sections                 # 查看各章节状态
 ```
 
 ### brain-memory — 长期记忆
@@ -89,10 +94,16 @@ brain_db.py soul evolve         # 人格进化反思
 
 ## 依赖
 
+**必需：**
 - **Supabase PostgreSQL** — 数据存储（免费额度足够个人使用）
 - **Python 3.10+** — 脚本运行（psycopg2 自动安装）
-- **OpenRouter API** — LLM 调用（反思、合成、知识消化）
-- **Firecrawl CLI** — 网页抓取（可选）
+
+**可选（高级功能）：**
+- **OpenRouter API** — LLM 调用：反思、合成、知识消化、人格进化
+- **Embedding Edge Function** — 语义搜索（代码已提供：`supabase/functions/embed/`）
+- **Firecrawl CLI** — 网页抓取学习
+
+基础的记忆读写和 AGENTS.md 生成只需要数据库，不需要任何 API key。
 
 ## 场景模式
 

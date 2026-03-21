@@ -705,6 +705,119 @@ def cmd_synthesize(args):
     print(f"✅ AGENTS.md 已更新: {len(md.splitlines())} 行")
 
 
+def cmd_setup(args):
+    """环境检查 + 引导设置。"""
+    check_specific = args.check_db or args.check_tables or args.check_embed or args.check_llm
+    checks = []
+
+    print("🧠 大脑环境检查")
+    print("━" * 40)
+
+    # .env
+    env_path = BRAIN_ROOT / ".env"
+    env_ok = env_path.exists()
+    checks.append(("  .env 文件", env_ok, "存在" if env_ok else "不存在 → cp .env.example .env"))
+    if not check_specific or True:
+        _print_check(".env 文件", env_ok, "不存在 → 运行 cp .env.example .env")
+
+    # BRAIN_PROFILE
+    profile_ok = PROFILE != "default" and PROFILE != ""
+    if not check_specific or True:
+        _print_check(f"BRAIN_PROFILE = {PROFILE}", profile_ok, "未设置 → 编辑 .env 填入你的名字")
+
+    # DB connection
+    db_ok = False
+    if not check_specific or args.check_db:
+        if DB_URL:
+            try:
+                conn = get_conn(retries=1)
+                conn.close()
+                db_ok = True
+            except SystemExit:
+                pass
+        _print_check("数据库连接", db_ok, "失败 → 检查 BRAIN_DATABASE_URI")
+
+    # Tables
+    tables_ok = False
+    if not check_specific or args.check_tables:
+        if db_ok or (DB_URL and not check_specific):
+            try:
+                rows = execute(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = 'brain' AND table_name = 'entries') AS ok"
+                )
+                tables_ok = rows[0]["ok"] if rows else False
+            except SystemExit:
+                pass
+            _print_check("brain.entries 表", tables_ok, "不存在 → 运行 brain_identity.py init")
+
+            ai_state_ok = False
+            try:
+                rows = execute(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema = 'brain' AND table_name = 'ai_state') AS ok"
+                )
+                ai_state_ok = rows[0]["ok"] if rows else False
+            except SystemExit:
+                pass
+            _print_check("brain.ai_state 表", ai_state_ok, "不存在 → 运行 brain_identity.py init")
+
+    # Embedding
+    embed_ok = False
+    if not check_specific or args.check_embed:
+        embed_url = os.environ.get("BRAIN_EMBED_URL", "")
+        embed_key = os.environ.get("BRAIN_API_KEY", "")
+        if embed_url and embed_key:
+            try:
+                payload = json.dumps({"input": ["test"]}).encode("utf-8")
+                req = urllib.request.Request(
+                    embed_url, data=payload,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {embed_key}"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    embed_ok = resp.status == 200
+            except Exception:
+                pass
+        _print_check("Embedding (语义搜索)", embed_ok, "未配置（可选）→ 部署 supabase/functions/embed")
+
+    # LLM
+    llm_ok = False
+    if not check_specific or args.check_llm:
+        llm_key = os.environ.get("OPENROUTER_API_KEY") or _get_secret("openrouter_api_key") if db_ok else os.environ.get("OPENROUTER_API_KEY")
+        llm_ok = bool(llm_key)
+        _print_check("LLM API Key (反思/合成)", llm_ok, "未配置（可选）→ 注册 openrouter.ai 获取 key")
+
+    # AGENTS.md
+    agents_ok = False
+    if not check_specific or True:
+        if AGENTS_MD_PATH.exists():
+            content = AGENTS_MD_PATH.read_text(encoding="utf-8")
+            agents_ok = "brain-identity generated" in content[:500]
+        _print_check("AGENTS.md 已生成", agents_ok, "未生成 → 运行 brain_identity.py init")
+
+    print()
+    all_required = env_ok and profile_ok and db_ok and tables_ok and agents_ok
+    if all_required:
+        status = "基础功能就绪 ✅"
+        if not embed_ok:
+            status += "\n  可选: 部署 Embed Edge Function 启用语义搜索"
+        if not llm_ok:
+            status += "\n  可选: 配置 OpenRouter API Key 启用反思/合成/学习"
+    else:
+        status = "需要完成以上标记为 ❌ 的项目"
+
+    print(f"  状态: {status}")
+
+
+def _print_check(label: str, ok: bool, hint: str = ""):
+    icon = "✅" if ok else "❌"
+    line = f"  {icon} {label}"
+    if not ok and hint:
+        line += f" — {hint}"
+    print(line)
+
+
 # ──────────────────────────── Main ────────────────────────────
 
 def main():
@@ -731,6 +844,12 @@ def main():
     p = sub.add_parser("synthesize", help="🧬 从碎片记忆合成 identity sections")
     p.add_argument("section", nargs="?", default=None, help="指定 section（默认全部）")
 
+    p = sub.add_parser("setup", help="🔍 环境检查 + 引导设置")
+    p.add_argument("--check-db", action="store_true", help="只检查数据库连接")
+    p.add_argument("--check-tables", action="store_true", help="只检查表结构")
+    p.add_argument("--check-embed", action="store_true", help="只检查 Embedding")
+    p.add_argument("--check-llm", action="store_true", help="只检查 LLM API")
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
@@ -743,6 +862,7 @@ def main():
         "sections": cmd_sections,
         "migrate": cmd_migrate,
         "synthesize": cmd_synthesize,
+        "setup": cmd_setup,
     }
     handlers[args.command](args)
 
