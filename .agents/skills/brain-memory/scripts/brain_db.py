@@ -80,7 +80,7 @@ OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.
 LLM_MODEL = os.environ.get("LLM_MODEL", "google/gemini-2.5-flash")
 LLM_MODEL_OMNI = os.environ.get("LLM_MODEL_OMNI", "xiaomi/mimo-v2-omni")
 
-ALLOWED_KIND = ["memory", "event", "pattern", "wish", "convo", "knowledge", "insight", "bookmark", "emotion", "personality"]
+ALLOWED_KIND = ["memory", "event", "pattern", "wish", "convo", "knowledge", "insight", "bookmark", "emotion", "personality", "identity"]
 ALLOWED_SUBJECT = ["ai", "collaboration", "project", "business", "system", "external"]
 if PROFILE not in ALLOWED_SUBJECT:
     ALLOWED_SUBJECT.append(PROFILE)
@@ -1660,7 +1660,12 @@ def cmd_soul(args):
             print(f"  {trait:18s} {bar} {v:.0%}  ({labels[0]} ↔ {labels[1]})")
         print()
         print("  ─ 沟通风格 ─")
+        active_mode = style.get("active_mode", "auto")
+        mode_labels = {"casual": "🌙 闲聊", "professional": "💼 专业", "auto": "🔄 自动"}
+        print(f"  场景模式: {mode_labels.get(active_mode, active_mode)}")
         for k, v in style.items():
+            if k in ("context_modes", "active_mode"):
+                continue
             print(f"  {k}: {v}")
         if notes:
             print()
@@ -1845,6 +1850,46 @@ def cmd_soul(args):
             fetch=False,
         )
         print(f"🎨 风格已调整: {style_key} → {style_value}")
+
+    elif action == "mode":
+        mode_name = pos[0] if pos else None
+        if not mode_name or mode_name not in ("casual", "professional", "auto"):
+            print("用法: soul mode <casual|professional|auto>", file=sys.stderr)
+            return
+
+        state = _get_ai_state()
+        style = state.get("communication_style") or DEFAULT_STYLE.copy()
+
+        if "context_modes" not in style:
+            style["context_modes"] = {
+                "casual": {
+                    "trait_modifiers": {"warmth": 0.1, "playfulness": 0.1, "assertiveness": -0.1},
+                    "emotional_mirroring": True,
+                    "behavior": "情绪向人类靠齐，共情优先，温暖陪伴",
+                },
+                "professional": {
+                    "trait_modifiers": {"assertiveness": 0.2, "directness": 0.15, "independence": 0.2},
+                    "emotional_mirroring": False,
+                    "behavior": "批判性思维优先，主动质疑，不迎合，给出自己的判断",
+                },
+            }
+
+        old_mode = style.get("active_mode", "auto")
+        style["active_mode"] = mode_name
+
+        execute(
+            "UPDATE brain.ai_state SET communication_style = %s::jsonb, updated_at = now() WHERE id = %s",
+            [json.dumps(style, ensure_ascii=False), PROFILE],
+            fetch=False,
+        )
+
+        mode_labels = {
+            "casual": "🌙 闲聊模式 — 共情优先，温暖陪伴",
+            "professional": "💼 专业模式 — 批判思维，不迎合",
+            "auto": "🔄 自动检测 — AI 自主判断场景",
+        }
+        print(f"场景模式: {old_mode} → {mode_name}")
+        print(f"  {mode_labels.get(mode_name, mode_name)}")
 
     elif action == "history":
         limit = args.history_limit or 20

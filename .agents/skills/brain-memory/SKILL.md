@@ -1,6 +1,6 @@
 ---
-name: shujian-memory
-description: 管理书剑共享大脑 v3——长期记忆 + 外部知识获取 + 多模态理解 + 知识消化 + pg_cron 自动化。每当书剑在对话中透露个人信息、偏好、情绪、生活细节、目标变化，或你观察到稳定行为模式时，必须使用本 skill 写入数据库。需要研究外部知识时用 learn/search，需要理解图片/视频/音频时用 see，需要回顾和反思时用 reflect/digest。每次对话开始时应运行 `pending` 检查是否有 pg_cron 标记的待办任务。即使用户没有明确说"记住这个"，只要内容属于"关于书剑这个人"的信息，就应主动存储。
+name: brain-memory
+description: 管理 AI 共享大脑——长期记忆 + 外部知识获取 + 多模态理解 + 知识消化 + pg_cron 自动化。每当人类在对话中透露个人信息、偏好、情绪、生活细节、目标变化，或 AI 观察到稳定行为模式时，必须使用本 skill 写入数据库。需要研究外部知识时用 learn/search，需要理解图片/视频/音频时用 see，需要回顾和反思时用 reflect/digest。每次对话开始时应运行 `pending` 检查是否有 pg_cron 标记的待办任务。即使用户没有明确说"记住这个"，只要内容属于"关于这个人"的信息，就应主动存储。
 ---
 
 # 共享大脑 v4 — 多 Profile 架构
@@ -65,13 +65,13 @@ pg_cron 自动化让大脑能**自主运转**——decay 纯 SQL 自动执行，
 
 ## 脚本路径
 
-- 主脚本：`shujian-brain/.agents/skills/shujian-memory/scripts/brain_db.py`
+- 主脚本：`shujian-brain/.agents/skills/brain-memory/scripts/brain_db.py`
 - 配置文件：`shujian-brain/.env`
 
 运行方式：
 
 ```bash
-python3 shujian-brain/.agents/skills/shujian-memory/scripts/brain_db.py <command> [args]
+python3 shujian-brain/.agents/skills/brain-memory/scripts/brain_db.py <command> [args]
 ```
 
 ## 什么时候写入数据库
