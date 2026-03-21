@@ -483,25 +483,72 @@ def cmd_init(args):
     global PROFILE
     profile = args.profile or PROFILE
     PROFILE = profile
-    print(f"🧠 初始化大脑: profile={profile}")
 
+    print(f"🧠 初始化大脑: {profile}")
+    print("━" * 40)
+
+    # Step 1: Schema
+    print("\n📦 Step 1/5: 数据库 Schema")
     _init_schema()
+    print("  ✅ 数据库表就绪")
 
+    # Step 2: AI State
+    print("\n🤖 Step 2/5: AI 人格初始化")
     _ensure_ai_state()
-    _sync_env_secrets()
+    print("  ✅ AI 人格状态就绪")
 
+    # Step 3: Secrets sync
+    print("\n🔑 Step 3/5: 密钥同步")
+    _sync_env_secrets()
+    has_llm = bool(os.environ.get("OPENROUTER_API_KEY") or _get_secret("openrouter_api_key"))
+    if has_llm:
+        print("  ✅ LLM API Key 已配置")
+    else:
+        print("  ⬜ LLM API Key 未配置（可选，用于反思/合成/学习）")
+
+    # Step 4: Identity sections
+    print("\n📝 Step 4/5: 身份章节")
+    created = 0
     for section in IDENTITY_SECTIONS:
         existing = get_identity(section)
+        label = SECTION_LABELS.get(section, section)
         if not existing:
             set_identity(section, "")
-            print(f"  ✅ 创建 identity section: {section}")
+            print(f"  ✅ 创建: {label}")
+            created += 1
         else:
-            print(f"  ⏭ 已存在: {section}")
+            print(f"  ⏭ 已存在: {label}")
 
+    # Step 5: Generate AGENTS.md
+    print("\n📄 Step 5/5: 生成 AGENTS.md")
     content = generate_agents_md()
     AGENTS_MD_PATH.write_text(content, encoding="utf-8")
-    print(f"\n📄 AGENTS.md 已生成: {AGENTS_MD_PATH}")
-    print(f"   共 {len(content.splitlines())} 行")
+    print(f"  ✅ {len(content.splitlines())} 行")
+
+    # Summary
+    embed_url = os.environ.get("BRAIN_EMBED_URL", "")
+    embed_key = os.environ.get("BRAIN_API_KEY", "")
+
+    print("\n" + "━" * 40)
+    print(f"🎉 大脑初始化完成！Profile: {profile}")
+    print()
+    print("  已就绪:")
+    print("    ✅ 记忆系统 — brain_db.py add/find/observe")
+    print("    ✅ 人格系统 — brain_db.py soul status/mood/trait")
+    print("    ✅ 身份系统 — brain_identity.py generate/update/synthesize")
+    if has_llm:
+        print("    ✅ 知识获取 — brain_db.py learn/search/reflect")
+    if embed_url and embed_key:
+        print("    ✅ 语义搜索 — brain_db.py find --semantic")
+    print()
+    if not has_llm or not (embed_url and embed_key):
+        print("  可选功能（未配置）:")
+        if not has_llm:
+            print("    ⬜ LLM → 配置 OPENROUTER_API_KEY 启用反思/合成/学习")
+        if not (embed_url and embed_key):
+            print("    ⬜ Embedding → 部署 supabase/functions/embed 启用语义搜索")
+        print()
+    print("  现在可以开始对话了。AI 会逐步了解你。")
 
 
 def cmd_generate(args):
