@@ -1,3 +1,4 @@
 .env
+AGENTS.md
 *.pyc
 __pycache__/
