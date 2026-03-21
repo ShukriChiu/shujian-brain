@@ -3,33 +3,52 @@ name: shujian-memory
 description: 管理书剑共享大脑 v3——长期记忆 + 外部知识获取 + 多模态理解 + 知识消化 + pg_cron 自动化。每当书剑在对话中透露个人信息、偏好、情绪、生活细节、目标变化，或你观察到稳定行为模式时，必须使用本 skill 写入数据库。需要研究外部知识时用 learn/search，需要理解图片/视频/音频时用 see，需要回顾和反思时用 reflect/digest。每次对话开始时应运行 `pending` 检查是否有 pg_cron 标记的待办任务。即使用户没有明确说"记住这个"，只要内容属于"关于书剑这个人"的信息，就应主动存储。
 ---
 
-# 书剑共享大脑 v3
+# 共享大脑 v4 — 多 Profile 架构
 
 ## 核心理念
 
-AGENTS.md 是书剑能直接看到的"白板"——放规则、建议、想法、方向性思考。
-数据库是 AI 的"私人笔记本"——放关于书剑**这个人**的细粒度理解，跨对话持久积累。
+AGENTS.md 是人类能直接看到的"白板"——放规则、建议、想法、方向性思考。
+数据库是 AI 的"私人笔记本"——放关于**这个人**的细粒度理解，跨对话持久积累。
 外部知识系统让大脑能**主动学习**——从网页、搜索结果中获取知识并存储。
-多模态系统让大脑能**看见世界**——理解图片、视频、音频内容（`xiaomi/mimo-v2-omni`）。
+多模态系统让大脑能**看见世界**——理解图片、视频、音频内容。
 知识消化系统让大脑能**自我反思**——定期聚合记忆生成洞察、自动发现关联、清理过时记忆。
 pg_cron 自动化让大脑能**自主运转**——decay 纯 SQL 自动执行，reflect/digest/auto-link 通过 pending 机制触发。
 
-## 数据模型（v3）
+## 多 Profile 支持
+
+同一套代码和数据库，通过 `.env` 中的 `BRAIN_PROFILE` 隔离不同人的记忆和灵魂。
+
+| 配置项 | 说明 | 示例 |
+|--------|------|------|
+| `BRAIN_PROFILE` | 当前 profile 名 | `shujian` / `xiaohou` |
+| `BRAIN_DATABASE_URI` | PostgreSQL 连接串 | `postgresql://...` |
+| `BRAIN_API_KEY` | Embedding 函数密钥 | `brain-shujian-2026` |
+| `BRAIN_EMBED_URL` | Embedding 函数地址 | `https://xxx.supabase.co/functions/v1/embed` |
+| `LLM_MODEL` | 文本 LLM | `google/gemini-2.5-flash` |
+| `LLM_MODEL_OMNI` | 多模态 LLM | `xiaomi/mimo-v2-omni` |
+
+配置文件位于 `shujian-brain/.env`（已 gitignore）。脚本自动加载，环境变量优先级高于 .env。
+
+**为新人创建空白大脑**：只需修改 `.env` 中 `BRAIN_PROFILE=xiaohou`，首次运行时自动创建该 profile 的空白 ai_state 和 owner 隔离。
+
+## 数据模型（v4）
 
 统一表：`brain.entries`
 
+- 隔离字段：`owner`（按 profile 隔离，所有查询自动过滤）
 - 固定字段：`kind`, `subject`, `content`, `tags`, `confidence`, `source`, `event_date`
 - 扩展字段：`meta`（jsonb）
 - 关联字段：`related uuid[]`
 - 向量字段：`embedding vector(1536)`（RAG 已接入，model: `openai/text-embedding-3-small` via OpenRouter）
 
 辅助表：
-- `brain.secrets`：API 密钥管理（key/value/description）
-- `brain.cron_tasks`：定时任务管理（name/command/schedule/enabled/last_run/last_result）
+- `brain.ai_state`：AI 人格状态（每个 profile 一行，id = profile 名）
+- `brain.secrets`：API 密钥管理（全局共享）
+- `brain.cron_tasks`：定时任务管理（全局共享）
 
 ### kind
 
-- `memory`: 认知类记忆（关于书剑的人格、偏好、决策风格）
+- `memory`: 认知类记忆（关于该人的人格、偏好、决策风格）
 - `event`: 时间线事件（里程碑、重要事件）
 - `pattern`: 行为模式（带 frequency，自动计数）
 - `wish`: 心愿/问题
@@ -37,19 +56,22 @@ pg_cron 自动化让大脑能**自主运转**——decay 纯 SQL 自动执行，
 - `knowledge`: 从外部获取的知识片段（网页、搜索结果）
 - `insight`: AI 生成的洞察和反思
 - `bookmark`: 收藏的 URL/资源
+- `emotion`: AI 情绪记录（灵魂系统）
+- `personality`: AI 人格进化事件（灵魂系统）
 
 ### subject
 
-- `shujian` / `ai` / `collaboration` / `project` / `business` / `system` / `external`
+- `<profile名>` / `ai` / `collaboration` / `project` / `business` / `system` / `external`
 
 ## 脚本路径
 
-- 主脚本：`shujian-brain/.cursor/skills/shujian-memory/scripts/brain_db.py`
+- 主脚本：`shujian-brain/.agents/skills/shujian-memory/scripts/brain_db.py`
+- 配置文件：`shujian-brain/.env`
 
 运行方式：
 
 ```bash
-python3 shujian-brain/.cursor/skills/shujian-memory/scripts/brain_db.py <command> [args]
+python3 shujian-brain/.agents/skills/shujian-memory/scripts/brain_db.py <command> [args]
 ```
 
 ## 什么时候写入数据库

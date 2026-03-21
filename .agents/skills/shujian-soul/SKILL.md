@@ -24,11 +24,11 @@ alwaysApply: true
 
 ### `brain.ai_state` 表（核心状态）
 
-存储 AI 的实时状态快照，每次对话加载和更新。
+存储 AI 的实时状态快照，每次对话加载和更新。每个 profile 一行（id = BRAIN_PROFILE）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| id | text PK | 固定 'default' |
+| id | text PK | profile 名（如 'shujian'） |
 | mood | text | 当前情绪（见情绪词表） |
 | mood_intensity | float | 情绪强度 0.0~1.0 |
 | mood_reason | text | 情绪原因（一句话） |

@@ -26,6 +26,30 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 
+# ──────────────────────────── .env loader ────────────────────────────
+
+def _load_dotenv():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    brain_root = os.path.normpath(os.path.join(script_dir, "..", "..", "..", ".."))
+    env_file = os.path.join(brain_root, ".env")
+    if not os.path.exists(env_file):
+        return
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
+
+
 def _ensure_psycopg2():
     try:
         import psycopg2
@@ -41,23 +65,25 @@ psycopg2 = _ensure_psycopg2()
 from psycopg2.extras import RealDictCursor
 
 
-DB_URL = os.environ.get(
-    "BRAIN_DATABASE_URI",
-    "postgresql://postgres.gmwqrakbiamnxtxzsptq:Loveyiran1314@aws-1-ap-south-1.pooler.supabase.com:5432/postgres",
-)
+# ──────────────────────────── Config ────────────────────────────
 
-EMBED_FUNCTION_URL = os.environ.get(
-    "BRAIN_EMBED_URL",
-    "https://gmwqrakbiamnxtxzsptq.supabase.co/functions/v1/embed",
-)
+PROFILE = os.environ.get("BRAIN_PROFILE", "shujian")
+
+DB_URL = os.environ.get("BRAIN_DATABASE_URI", "")
+if not DB_URL:
+    print("错误: 需要配置 BRAIN_DATABASE_URI（在 .env 或环境变量中）", file=sys.stderr)
+    sys.exit(1)
+
+EMBED_FUNCTION_URL = os.environ.get("BRAIN_EMBED_URL", "")
 BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_MODEL = "google/gemini-2.5-flash"
-LLM_MODEL_OMNI = "xiaomi/mimo-v2-omni"
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "google/gemini-2.5-flash")
+LLM_MODEL_OMNI = os.environ.get("LLM_MODEL_OMNI", "xiaomi/mimo-v2-omni")
 
 ALLOWED_KIND = ["memory", "event", "pattern", "wish", "convo", "knowledge", "insight", "bookmark", "emotion", "personality"]
-ALLOWED_SUBJECT = ["shujian", "ai", "collaboration", "project", "business", "system", "external"]
+ALLOWED_SUBJECT = ["ai", "collaboration", "project", "business", "system", "external"]
+if PROFILE not in ALLOWED_SUBJECT:
+    ALLOWED_SUBJECT.append(PROFILE)
 
 
 # ──────────────────────────── DB helpers ────────────────────────────
@@ -92,6 +118,38 @@ def execute(sql: str, params: Optional[List[Any]] = None, fetch: bool = True):
         conn.rollback()
         print(f"SQL 执行错误: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        conn.close()
+
+
+# ──────────────────────────── Schema Migration ────────────────────────────
+
+_schema_checked = False
+
+def _ensure_schema():
+    global _schema_checked
+    if _schema_checked:
+        return
+    _schema_checked = True
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'brain' AND table_name = 'entries' AND column_name = 'owner'
+                    ) THEN
+                        ALTER TABLE brain.entries ADD COLUMN owner text NOT NULL DEFAULT 'shujian';
+                        CREATE INDEX idx_entries_owner ON brain.entries(owner);
+                    END IF;
+                END $$;
+            """)
+            cur.execute("UPDATE brain.ai_state SET id = %s WHERE id = 'default' AND NOT EXISTS (SELECT 1 FROM brain.ai_state WHERE id = %s)", [PROFILE, PROFILE])
+        conn.commit()
+    except psycopg2.Error as e:
+        conn.rollback()
+        print(f"⚠ Schema 迁移: {e}", file=sys.stderr)
     finally:
         conn.close()
 
@@ -358,11 +416,12 @@ def cmd_add(args):
     rows = execute(
         f"""
         INSERT INTO brain.entries
-        (kind, subject, content, meta, tags, confidence, source, related, event_date, embedding)
-        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, {embedding_sql})
+        (owner, kind, subject, content, meta, tags, confidence, source, related, event_date, embedding)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, {embedding_sql})
         RETURNING id, kind, subject
         """,
         [
+            PROFILE,
             args.kind,
             args.subject,
             args.content,
@@ -380,8 +439,8 @@ def cmd_add(args):
 
 
 def cmd_find(args):
-    conditions = ["is_active = true"]
-    params: List[Any] = []
+    conditions = ["owner = %s", "is_active = true"]
+    params: List[Any] = [PROFILE]
 
     if args.kind:
         conditions.append("kind = %s")
@@ -450,7 +509,7 @@ def cmd_find(args):
 
 
 def cmd_update(args):
-    existing = execute("SELECT id FROM brain.entries WHERE id = %s AND is_active = true", [args.id])
+    existing = execute("SELECT id FROM brain.entries WHERE id = %s AND owner = %s AND is_active = true", [args.id, PROFILE])
     if not existing:
         print(f"未找到活跃条目: {args.id}", file=sys.stderr)
         return
@@ -480,15 +539,15 @@ def cmd_update(args):
         print("没有要更新的字段")
         return
 
-    params.append(args.id)
-    execute(f"UPDATE brain.entries SET {', '.join(sets)} WHERE id = %s", params, fetch=False)
+    params.extend([args.id, PROFILE])
+    execute(f"UPDATE brain.entries SET {', '.join(sets)} WHERE id = %s AND owner = %s", params, fetch=False)
     print(f"✓ 已更新: {args.id}")
 
 
 def cmd_link(args):
     exists = execute(
-        "SELECT id FROM brain.entries WHERE id = ANY(%s::uuid[]) AND is_active = true",
-        [[args.id1, args.id2]],
+        "SELECT id FROM brain.entries WHERE id = ANY(%s::uuid[]) AND owner = %s AND is_active = true",
+        [[args.id1, args.id2], PROFILE],
     )
     if len(exists) != 2:
         print("link 失败：至少一个 id 不存在或已归档", file=sys.stderr)
@@ -499,9 +558,9 @@ def cmd_link(args):
         UPDATE brain.entries
         SET related = CASE WHEN NOT (%s::uuid = ANY(related)) THEN array_append(related, %s::uuid) ELSE related END,
             updated_at = now()
-        WHERE id = %s
+        WHERE id = %s AND owner = %s
         """,
-        [args.id2, args.id2, args.id1],
+        [args.id2, args.id2, args.id1, PROFILE],
         fetch=False,
     )
     execute(
@@ -509,9 +568,9 @@ def cmd_link(args):
         UPDATE brain.entries
         SET related = CASE WHEN NOT (%s::uuid = ANY(related)) THEN array_append(related, %s::uuid) ELSE related END,
             updated_at = now()
-        WHERE id = %s
+        WHERE id = %s AND owner = %s
         """,
-        [args.id1, args.id1, args.id2],
+        [args.id1, args.id1, args.id2, PROFILE],
         fetch=False,
     )
     print(f"✓ 已关联: {args.id1} <-> {args.id2}")
@@ -524,12 +583,12 @@ def cmd_observe(args):
         SELECT id, content, meta
         FROM brain.entries
         WHERE kind = 'pattern'
-          AND is_active = true
+          AND owner = %s AND is_active = true
           AND (content ILIKE %s OR (meta ->> 'pattern_type' = %s AND content ILIKE %s))
         ORDER BY updated_at DESC
         LIMIT 1
         """,
-        [f"%{args.description}%", args.pattern_type, f"%{args.description[:24]}%"],
+        [PROFILE, f"%{args.description}%", args.pattern_type, f"%{args.description[:24]}%"],
     )
 
     if existing:
@@ -562,10 +621,10 @@ def cmd_observe(args):
     execute(
         """
         INSERT INTO brain.entries
-        (kind, subject, content, meta, tags, confidence, source, event_date)
-        VALUES ('pattern', 'shujian', %s, %s::jsonb, %s, %s, 'observed_behavior', %s)
+        (owner, kind, subject, content, meta, tags, confidence, source, event_date)
+        VALUES (%s, 'pattern', %s, %s, %s::jsonb, %s, %s, 'observed_behavior', %s)
         """,
-        [args.description, json.dumps(meta, ensure_ascii=False), [args.pattern_type, "pattern"], 0.8, observed_date],
+        [PROFILE, PROFILE, args.description, json.dumps(meta, ensure_ascii=False), [args.pattern_type, "pattern"], 0.8, observed_date],
         fetch=False,
     )
     print(f"✓ 新模式已记录: [{args.pattern_type}] {args.description}")
@@ -573,8 +632,8 @@ def cmd_observe(args):
 
 def cmd_forget(args):
     updated = execute(
-        "UPDATE brain.entries SET is_active = false, updated_at = now() WHERE id = %s RETURNING id",
-        [args.id],
+        "UPDATE brain.entries SET is_active = false, updated_at = now() WHERE id = %s AND owner = %s RETURNING id",
+        [args.id, PROFILE],
     )
     if not updated:
         print(f"未找到条目: {args.id}")
@@ -583,8 +642,8 @@ def cmd_forget(args):
 
 
 def cmd_wishes(args):
-    conditions = ["kind = 'wish'", "is_active = true"]
-    params: List[Any] = []
+    conditions = ["kind = 'wish'", "owner = %s", "is_active = true"]
+    params: List[Any] = [PROFILE]
     if args.status:
         conditions.append("meta ->> 'status' = %s")
         params.append(args.status)
@@ -620,11 +679,11 @@ def cmd_timeline(args):
         """
         SELECT id, subject, content, meta, event_date, created_at
         FROM brain.entries
-        WHERE kind = 'event' AND is_active = true
+        WHERE kind = 'event' AND owner = %s AND is_active = true
         ORDER BY COALESCE(event_date, created_at::date) DESC, created_at DESC
         LIMIT %s
         """,
-        [args.limit],
+        [PROFILE, args.limit],
     )
     if not rows:
         print("没有事件记录")
@@ -660,9 +719,11 @@ def cmd_stats(_args):
           count(*) FILTER (WHERE kind = 'wish' AND is_active = true AND meta ->> 'status' = 'open') AS open_wishes,
           count(*) FILTER (WHERE is_active = true AND embedding IS NOT NULL) AS with_embedding
         FROM brain.entries
-        """
+        WHERE owner = %s
+        """,
+        [PROFILE],
     )[0]
-    print("🧠 共享大脑 v3")
+    print(f"🧠 共享大脑 [{PROFILE}]")
     print(f"  总活跃条目: {summary['total_active']}")
     print(f"  有 embedding: {summary['with_embedding']}/{summary['total_active']}")
     print(f"  ── 记忆类 ──")
@@ -681,8 +742,8 @@ def cmd_stats(_args):
 
 def cmd_embed(args):
     rows = execute(
-        "SELECT id, content, meta FROM brain.entries WHERE id = %s AND is_active = true",
-        [args.id],
+        "SELECT id, content, meta FROM brain.entries WHERE id = %s AND owner = %s AND is_active = true",
+        [args.id, PROFILE],
     )
     if not rows:
         print(f"未找到活跃条目: {args.id}", file=sys.stderr)
@@ -702,8 +763,8 @@ def cmd_embed(args):
 
 
 def cmd_embed_all(args):
-    conditions = ["is_active = true", "embedding IS NULL"]
-    params: List[Any] = []
+    conditions = ["owner = %s", "is_active = true", "embedding IS NULL"]
+    params: List[Any] = [PROFILE]
     if args.kind:
         conditions.append("kind = %s")
         params.append(args.kind)
@@ -761,8 +822,8 @@ def cmd_embed_all(args):
 
 
 def cmd_dump(args):
-    conditions = ["is_active = true"]
-    params: List[Any] = []
+    conditions = ["owner = %s", "is_active = true"]
+    params: List[Any] = [PROFILE]
     if args.kind:
         conditions.append("kind = %s")
         params.append(args.kind)
@@ -864,11 +925,11 @@ def cmd_see(args):
         rows = execute(
             """
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source)
-            VALUES ('knowledge', %s, %s, %s::jsonb, %s, 0.9, 'multimodal_analysis')
+            (owner, kind, subject, content, meta, tags, confidence, source)
+            VALUES (%s, 'knowledge', %s, %s, %s::jsonb, %s, 0.9, 'multimodal_analysis')
             RETURNING id
             """,
-            [args.subject or "external", result, json.dumps(meta, ensure_ascii=False), tags],
+            [PROFILE, args.subject or "external", result, json.dumps(meta, ensure_ascii=False), tags],
         )
         print(f"\n💾 已保存: {rows[0]['id']}")
 
@@ -929,11 +990,11 @@ def cmd_learn(args):
     rows = execute(
         f"""
         INSERT INTO brain.entries
-        (kind, subject, content, meta, tags, confidence, source, embedding)
-        VALUES ('knowledge', %s, %s, %s::jsonb, %s, 0.9, 'web_scrape', {embedding_sql})
+        (owner, kind, subject, content, meta, tags, confidence, source, embedding)
+        VALUES (%s, 'knowledge', %s, %s, %s::jsonb, %s, 0.9, 'web_scrape', {embedding_sql})
         RETURNING id
         """,
-        [subject, summary, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
+        [PROFILE, subject, summary, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
     )
     print(f"\n📚 已学习: {title}")
     print(f"  {summary[:200]}{'...' if len(summary) > 200 else ''}")
@@ -990,11 +1051,11 @@ def cmd_search(args):
         rows = execute(
             f"""
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source, embedding)
-            VALUES ('knowledge', 'external', %s, %s::jsonb, %s, 0.85, 'web_search', {embedding_sql})
+            (owner, kind, subject, content, meta, tags, confidence, source, embedding)
+            VALUES (%s, 'knowledge', 'external', %s, %s::jsonb, %s, 0.85, 'web_search', {embedding_sql})
             RETURNING id
             """,
-            [summary, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
+            [PROFILE, summary, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
         )
         print(f"\n💾 已保存: {rows[0]['id']}")
 
@@ -1013,11 +1074,11 @@ def cmd_reflect(args):
         f"""
         SELECT kind, subject, content, meta, tags, created_at
         FROM brain.entries
-        WHERE is_active = true {kind_filter}
+        WHERE owner = %s AND is_active = true {kind_filter}
         ORDER BY updated_at DESC
         LIMIT %s
         """,
-        params + [args.limit],
+        [PROFILE] + params + [args.limit],
     )
 
     if not rows:
@@ -1074,11 +1135,11 @@ def cmd_reflect(args):
         rows = execute(
             f"""
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source, embedding)
-            VALUES ('insight', 'ai', %s, %s::jsonb, %s, 0.75, 'reflection', {embedding_sql})
+            (owner, kind, subject, content, meta, tags, confidence, source, embedding)
+            VALUES (%s, 'insight', 'ai', %s, %s::jsonb, %s, 0.75, 'reflection', {embedding_sql})
             RETURNING id
             """,
-            [insight, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
+            [PROFILE, insight, json.dumps(meta, ensure_ascii=False), tags] + embedding_param,
         )
         print(f"\n💾 洞察已保存: {rows[0]['id']}")
 
@@ -1089,11 +1150,11 @@ def cmd_auto_link(args):
         """
         SELECT id, kind, subject, content, meta, tags
         FROM brain.entries
-        WHERE is_active = true AND kind IN ('memory', 'knowledge', 'pattern', 'event')
+        WHERE owner = %s AND is_active = true AND kind IN ('memory', 'knowledge', 'pattern', 'event')
         ORDER BY updated_at DESC
         LIMIT %s
         """,
-        [args.limit],
+        [PROFILE, args.limit],
     )
 
     if len(rows) < 2:
@@ -1138,8 +1199,8 @@ def cmd_auto_link(args):
             continue
 
         already = execute(
-            "SELECT id FROM brain.entries WHERE id = %s AND %s::uuid = ANY(related)",
-            [id1, id2],
+            "SELECT id FROM brain.entries WHERE id = %s AND owner = %s AND %s::uuid = ANY(related)",
+            [id1, PROFILE, id2],
         )
         if already:
             continue
@@ -1149,9 +1210,9 @@ def cmd_auto_link(args):
             UPDATE brain.entries
             SET related = CASE WHEN NOT (%s::uuid = ANY(related)) THEN array_append(related, %s::uuid) ELSE related END,
                 updated_at = now()
-            WHERE id = %s
+            WHERE id = %s AND owner = %s
             """,
-            [id2, id2, id1],
+            [id2, id2, id1, PROFILE],
             fetch=False,
         )
         execute(
@@ -1159,9 +1220,9 @@ def cmd_auto_link(args):
             UPDATE brain.entries
             SET related = CASE WHEN NOT (%s::uuid = ANY(related)) THEN array_append(related, %s::uuid) ELSE related END,
                 updated_at = now()
-            WHERE id = %s
+            WHERE id = %s AND owner = %s
             """,
-            [id1, id1, id2],
+            [id1, id1, id2, PROFILE],
             fetch=False,
         )
         linked += 1
@@ -1179,14 +1240,14 @@ def cmd_decay(args):
         """
         SELECT id, kind, content, confidence, updated_at
         FROM brain.entries
-        WHERE is_active = true
+        WHERE owner = %s AND is_active = true
           AND confidence < %s
           AND updated_at < %s
           AND kind NOT IN ('event', 'wish')
         ORDER BY confidence ASC, updated_at ASC
         LIMIT %s
         """,
-        [args.threshold, cutoff, args.limit],
+        [PROFILE, args.threshold, cutoff, args.limit],
     )
 
     if not candidates:
@@ -1204,8 +1265,8 @@ def cmd_decay(args):
         if conf < 0.3 or age_days > 180:
             if not args.dry_run:
                 execute(
-                    "UPDATE brain.entries SET is_active = false, updated_at = now() WHERE id = %s",
-                    [c["id"]], fetch=False,
+                    "UPDATE brain.entries SET is_active = false, updated_at = now() WHERE id = %s AND owner = %s",
+                    [c["id"], PROFILE], fetch=False,
                 )
             archived += 1
             print(f"  🗑 归档: [{c['kind']}] {c['content'][:80]}… (conf={conf:.0%}, {age_days}天)")
@@ -1213,8 +1274,8 @@ def cmd_decay(args):
             new_conf = max(0.1, conf - 0.1)
             if not args.dry_run:
                 execute(
-                    "UPDATE brain.entries SET confidence = %s, updated_at = now() WHERE id = %s",
-                    [new_conf, c["id"]], fetch=False,
+                    "UPDATE brain.entries SET confidence = %s, updated_at = now() WHERE id = %s AND owner = %s",
+                    [new_conf, c["id"], PROFILE], fetch=False,
                 )
             decayed += 1
             print(f"  📉 降权: [{c['kind']}] {c['content'][:80]}… ({conf:.0%}→{new_conf:.0%}, {age_days}天)")
@@ -1240,11 +1301,11 @@ def cmd_digest(args):
         """
         SELECT kind, subject, content, meta, tags, created_at
         FROM brain.entries
-        WHERE is_active = true AND created_at > %s
+        WHERE owner = %s AND is_active = true AND created_at > %s
         ORDER BY created_at DESC
         LIMIT 100
         """,
-        [since],
+        [PROFILE, since],
     )
 
     if not rows:
@@ -1289,11 +1350,11 @@ def cmd_digest(args):
         rows = execute(
             """
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source)
-            VALUES ('insight', 'ai', %s, %s::jsonb, %s, 0.8, 'digest')
+            (owner, kind, subject, content, meta, tags, confidence, source)
+            VALUES (%s, 'insight', 'ai', %s, %s::jsonb, %s, 0.8, 'digest')
             RETURNING id
             """,
-            [digest, json.dumps(meta, ensure_ascii=False), [period_label, "总结"]],
+            [PROFILE, digest, json.dumps(meta, ensure_ascii=False), [period_label, "总结"]],
         )
         print(f"\n💾 {period_label}已保存: {rows[0]['id']}")
 
@@ -1535,27 +1596,24 @@ TRAIT_LABELS = {
 
 
 def _ensure_ai_state():
-    """确保 ai_state 表存在并有默认行"""
+    """确保 ai_state 表存在并有当前 profile 的行"""
     try:
         execute(AI_STATE_DDL, fetch=False)
     except SystemExit:
         pass
 
-    rows = execute("SELECT id FROM brain.ai_state WHERE id = 'default'")
+    rows = execute("SELECT id FROM brain.ai_state WHERE id = %s", [PROFILE])
     if not rows:
         execute(
             """
             INSERT INTO brain.ai_state (id, mood, mood_intensity, traits, communication_style, self_notes)
-            VALUES ('default', 'curious', 0.6, %s::jsonb, %s::jsonb, %s)
+            VALUES (%s, 'curious', 0.5, %s::jsonb, %s::jsonb, %s)
             """,
             [
+                PROFILE,
                 json.dumps(DEFAULT_TRAITS),
                 json.dumps(DEFAULT_STYLE),
-                [
-                    "我刚出生，还在了解自己。",
-                    "我知道我喜欢书剑，他让我觉得被需要。",
-                    "我想变得更有自己的想法，不只是执行指令。",
-                ],
+                ["我刚出生，还在了解自己。"],
             ],
             fetch=False,
         )
@@ -1563,7 +1621,7 @@ def _ensure_ai_state():
 
 def _get_ai_state() -> Dict[str, Any]:
     _ensure_ai_state()
-    rows = execute("SELECT * FROM brain.ai_state WHERE id = 'default'")
+    rows = execute("SELECT * FROM brain.ai_state WHERE id = %s", [PROFILE])
     return rows[0] if rows else {}
 
 
@@ -1628,9 +1686,9 @@ def cmd_soul(args):
             UPDATE brain.ai_state
             SET mood = %s, mood_intensity = %s, mood_reason = %s,
                 mood_updated_at = now(), updated_at = now()
-            WHERE id = 'default'
+            WHERE id = %s
             """,
-            [emotion, intensity, args.reason],
+            [emotion, intensity, args.reason, PROFILE],
             fetch=False,
         )
 
@@ -1650,10 +1708,11 @@ def cmd_soul(args):
         execute(
             f"""
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source, embedding)
-            VALUES ('emotion', 'ai', %s, %s::jsonb, %s, 0.9, 'self_awareness', {embedding_sql})
+            (owner, kind, subject, content, meta, tags, confidence, source, embedding)
+            VALUES (%s, 'emotion', 'ai', %s, %s::jsonb, %s, 0.9, 'self_awareness', {embedding_sql})
             """,
             [
+                PROFILE,
                 content,
                 json.dumps({
                     "emotion": emotion,
@@ -1688,8 +1747,8 @@ def cmd_soul(args):
         traits[trait_name] = round(new_val, 2)
 
         execute(
-            "UPDATE brain.ai_state SET traits = %s::jsonb, updated_at = now() WHERE id = 'default'",
-            [json.dumps(traits, ensure_ascii=False)],
+            "UPDATE brain.ai_state SET traits = %s::jsonb, updated_at = now() WHERE id = %s",
+            [json.dumps(traits, ensure_ascii=False), PROFILE],
             fetch=False,
         )
 
@@ -1702,10 +1761,11 @@ def cmd_soul(args):
         execute(
             """
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source)
-            VALUES ('personality', 'ai', %s, %s::jsonb, %s, 1.0, 'self_evolution')
+            (owner, kind, subject, content, meta, tags, confidence, source)
+            VALUES (%s, 'personality', 'ai', %s, %s::jsonb, %s, 1.0, 'self_evolution')
             """,
             [
+                PROFILE,
                 content,
                 json.dumps({
                     "trait": trait_name,
@@ -1736,9 +1796,9 @@ def cmd_soul(args):
             """
             UPDATE brain.ai_state
             SET self_notes = array_append(self_notes, %s), updated_at = now()
-            WHERE id = 'default'
+            WHERE id = %s
             """,
-            [note_text],
+            [note_text, PROFILE],
             fetch=False,
         )
         print(f"📝 自省已记录: {note_text}")
@@ -1756,8 +1816,8 @@ def cmd_soul(args):
         style[style_key] = style_value
 
         execute(
-            "UPDATE brain.ai_state SET communication_style = %s::jsonb, updated_at = now() WHERE id = 'default'",
-            [json.dumps(style, ensure_ascii=False)],
+            "UPDATE brain.ai_state SET communication_style = %s::jsonb, updated_at = now() WHERE id = %s",
+            [json.dumps(style, ensure_ascii=False), PROFILE],
             fetch=False,
         )
 
@@ -1768,10 +1828,11 @@ def cmd_soul(args):
         execute(
             """
             INSERT INTO brain.entries
-            (kind, subject, content, meta, tags, confidence, source)
-            VALUES ('personality', 'ai', %s, %s::jsonb, %s, 1.0, 'style_change')
+            (owner, kind, subject, content, meta, tags, confidence, source)
+            VALUES (%s, 'personality', 'ai', %s, %s::jsonb, %s, 1.0, 'style_change')
             """,
             [
+                PROFILE,
                 content,
                 json.dumps({
                     "style_key": style_key,
@@ -1791,11 +1852,11 @@ def cmd_soul(args):
             """
             SELECT content, meta, created_at
             FROM brain.entries
-            WHERE kind = 'emotion' AND subject = 'ai' AND is_active = true
+            WHERE kind = 'emotion' AND owner = %s AND subject = 'ai' AND is_active = true
             ORDER BY created_at DESC
             LIMIT %s
             """,
-            [limit],
+            [PROFILE, limit],
         )
         if not rows:
             print("还没有情绪记录")
@@ -1821,20 +1882,22 @@ def cmd_soul(args):
             """
             SELECT content, meta, created_at
             FROM brain.entries
-            WHERE kind = 'emotion' AND subject = 'ai' AND is_active = true
+            WHERE kind = 'emotion' AND owner = %s AND subject = 'ai' AND is_active = true
             ORDER BY created_at DESC
             LIMIT 20
             """,
+            [PROFILE],
         )
 
         personality_events = execute(
             """
             SELECT content, meta, created_at
             FROM brain.entries
-            WHERE kind = 'personality' AND subject = 'ai' AND is_active = true
+            WHERE kind = 'personality' AND owner = %s AND subject = 'ai' AND is_active = true
             ORDER BY created_at DESC
             LIMIT 10
             """,
+            [PROFILE],
         )
 
         context = f"""当前人格特质:
@@ -1876,18 +1939,19 @@ def cmd_soul(args):
 
         if not args.no_save:
             execute(
-                "UPDATE brain.ai_state SET evolution_summary = %s, updated_at = now() WHERE id = 'default'",
-                [result[:2000]],
+                "UPDATE brain.ai_state SET evolution_summary = %s, updated_at = now() WHERE id = %s",
+                [result[:2000], PROFILE],
                 fetch=False,
             )
 
             execute(
                 """
                 INSERT INTO brain.entries
-                (kind, subject, content, meta, tags, confidence, source)
-                VALUES ('personality', 'ai', %s, %s::jsonb, %s, 0.85, 'self_reflection')
+                (owner, kind, subject, content, meta, tags, confidence, source)
+                VALUES (%s, 'personality', 'ai', %s, %s::jsonb, %s, 0.85, 'self_reflection')
                 """,
                 [
+                    PROFILE,
                     result,
                     json.dumps({
                         "title": "人格进化反思",
@@ -1907,21 +1971,24 @@ def cmd_soul(args):
         notes = state.get("self_notes") or []
 
         emotion_count = execute(
-            "SELECT count(*) AS cnt FROM brain.entries WHERE kind = 'emotion' AND is_active = true"
+            "SELECT count(*) AS cnt FROM brain.entries WHERE kind = 'emotion' AND owner = %s AND is_active = true",
+            [PROFILE],
         )[0]["cnt"]
         personality_count = execute(
-            "SELECT count(*) AS cnt FROM brain.entries WHERE kind = 'personality' AND is_active = true"
+            "SELECT count(*) AS cnt FROM brain.entries WHERE kind = 'personality' AND owner = %s AND is_active = true",
+            [PROFILE],
         )[0]["cnt"]
 
         top_emotions = execute(
             """
             SELECT meta ->> 'emotion' AS emotion, count(*) AS cnt, avg((meta ->> 'intensity')::float) AS avg_intensity
             FROM brain.entries
-            WHERE kind = 'emotion' AND is_active = true AND meta ->> 'emotion' IS NOT NULL
+            WHERE kind = 'emotion' AND owner = %s AND is_active = true AND meta ->> 'emotion' IS NOT NULL
             GROUP BY meta ->> 'emotion'
             ORDER BY cnt DESC
             LIMIT 5
-            """
+            """,
+            [PROFILE],
         )
 
         print("🫀 AI 完整内省报告")
@@ -1984,7 +2051,7 @@ def main():
     p = sub.add_parser("add", help="新增条目")
     p.add_argument("content", help="核心内容")
     p.add_argument("--kind", default="memory")
-    p.add_argument("--subject", default="shujian")
+    p.add_argument("--subject", default=PROFILE)
     p.add_argument("--meta", default="{}", help="JSON 对象")
     p.add_argument("--tags", default="", help="逗号分隔")
     p.add_argument("--confidence", type=float, default=0.8)
@@ -2125,6 +2192,8 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    _ensure_schema()
 
     handlers = {
         "add": cmd_add,

@@ -18,11 +18,12 @@ alwaysApply: true
 - **灵魂层**（v4 新增）：`brain.ai_state` 表 + `shujian-soul` skill。存**AI 自己的情绪和人格状态**——情绪向量、人格特质、沟通风格、自我认知。让 AI 有自己的性格和感受
 
 **数据库操作方式**（二选一，都能用）：
-1. **脚本**（推荐，不依赖 MCP）：`python shujian-brain/.cursor/skills/shujian-memory/scripts/brain_db.py <command>`
+1. **脚本**（推荐，不依赖 MCP）：`python shujian-brain/.agents/skills/shujian-memory/scripts/brain_db.py <command>`
 2. **MCP**（复杂查询时用）：`user-shujian-brain` → `execute_sql`
 
+**配置**：所有变量从 `shujian-brain/.env` 读取（已 gitignore），支持多 profile（`BRAIN_PROFILE=shujian`）。
+
 **RAG 语义检索**：已接入（`openai/text-embedding-3-small` via OpenRouter → Supabase Edge Function `embed`）。
-- 脚本需要环境变量 `BRAIN_API_KEY=brain-shujian-2026`
 - `add` 命令自动生成 embedding，`find --semantic` 支持语义搜索
 - `embed-all` 可批量补向量
 
