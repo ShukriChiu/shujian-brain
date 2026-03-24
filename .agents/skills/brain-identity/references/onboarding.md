@@ -131,7 +131,7 @@ python3 .agents/skills/brain-identity/scripts/brain_identity.py setup
 🧠 大脑环境检查
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ✅ .env 文件存在
-  ✅ BRAIN_PROFILE = shujian
+  ✅ BRAIN_PROFILE = your_name
   ✅ 数据库连接正常
   ✅ brain.entries 表存在
   ✅ brain.ai_state 表存在

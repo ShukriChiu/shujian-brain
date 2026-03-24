@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-书剑共享大脑 v3 — 统一 entries 表 + 外部知识获取 + 知识消化 + 定时任务
+共享大脑 v3 — 统一 entries 表 + 外部知识获取 + 知识消化 + 定时任务
 
 核心命令:
   add/find/update/link/observe/forget/stats/timeline/wishes/embed/embed-all/dump
@@ -67,15 +67,13 @@ from psycopg2.extras import RealDictCursor
 
 # ──────────────────────────── Config ────────────────────────────
 
-PROFILE = os.environ.get("BRAIN_PROFILE", "shujian")
+PROFILE = os.environ.get("BRAIN_PROFILE", "default")
 
 DB_URL = os.environ.get("BRAIN_DATABASE_URI", "")
 if not DB_URL:
     print("错误: 需要配置 BRAIN_DATABASE_URI（在 .env 或环境变量中）", file=sys.stderr)
     sys.exit(1)
 
-EMBED_FUNCTION_URL = os.environ.get("BRAIN_EMBED_URL", "")
-BRAIN_API_KEY = os.environ.get("BRAIN_API_KEY", "")
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "google/gemini-2.5-flash")
 LLM_MODEL_OMNI = os.environ.get("LLM_MODEL_OMNI", "xiaomi/mimo-v2-omni")
@@ -140,7 +138,7 @@ def _ensure_schema():
                         SELECT 1 FROM information_schema.columns
                         WHERE table_schema = 'brain' AND table_name = 'entries' AND column_name = 'owner'
                     ) THEN
-                        ALTER TABLE brain.entries ADD COLUMN owner text NOT NULL DEFAULT 'shujian';
+                        ALTER TABLE brain.entries ADD COLUMN owner text NOT NULL DEFAULT 'default';
                         CREATE INDEX idx_entries_owner ON brain.entries(owner);
                     END IF;
                 END $$;
@@ -167,6 +165,19 @@ def _get_openrouter_key() -> str:
         print("错误: 需要 openrouter_api_key（环境变量或 brain.secrets）", file=sys.stderr)
         sys.exit(1)
     return key
+
+
+_openrouter_key_cache: Optional[bool] = None
+
+def _can_embed() -> bool:
+    """检查 OpenRouter key 是否可用（不退出，缓存结果）"""
+    global _openrouter_key_cache
+    if _openrouter_key_cache is not None:
+        return _openrouter_key_cache
+    _openrouter_key_cache = bool(
+        os.environ.get("OPENROUTER_API_KEY") or get_secret("openrouter_api_key")
+    )
+    return _openrouter_key_cache
 
 
 def _get_firecrawl_key() -> str:
@@ -233,18 +244,17 @@ def normalize_pg_array(val: Any) -> List[str]:
 
 # ──────────────────────────── Embedding ────────────────────────────
 
-def call_embed_api(texts: List[str]) -> List[List[float]]:
-    if not BRAIN_API_KEY:
-        print("错误: 需要设置 BRAIN_API_KEY 环境变量", file=sys.stderr)
-        sys.exit(1)
+EMBED_MODEL = "openai/text-embedding-3-small"
 
-    payload = json.dumps({"input": texts}).encode("utf-8")
+def call_embed_api(texts: List[str]) -> List[List[float]]:
+    api_key = _get_openrouter_key()
+    payload = json.dumps({"model": EMBED_MODEL, "input": texts}).encode("utf-8")
     req = urllib.request.Request(
-        EMBED_FUNCTION_URL,
+        OPENROUTER_BASE_URL + "/embeddings",
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {BRAIN_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
         },
         method="POST",
     )
@@ -253,15 +263,15 @@ def call_embed_api(texts: List[str]) -> List[List[float]]:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        print(f"Embed API 错误 ({e.code}): {body}", file=sys.stderr)
+        print(f"Embedding API 错误 ({e.code}): {body}", file=sys.stderr)
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Embed API 网络错误: {e.reason}", file=sys.stderr)
+        print(f"Embedding API 网络错误: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
-    embeddings_data = result.get("embeddings", [])
-    embeddings_data.sort(key=lambda x: x["index"])
-    return [item["embedding"] for item in embeddings_data]
+    data = result.get("data", [])
+    data.sort(key=lambda x: x["index"])
+    return [item["embedding"] for item in data]
 
 
 def vector_to_pg_literal(vec: List[float]) -> str:
@@ -294,7 +304,7 @@ def _llm_request(payload: dict) -> str:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "X-OpenRouter-Title": "shujian-brain",
+            "X-OpenRouter-Title": "shared-brain",
         },
         method="POST",
     )
@@ -384,9 +394,39 @@ def firecrawl_search(query: str, limit: int = 5) -> str:
         return f"[错误] {e}"
 
 
+# ──────────────────────────── L0/L1 Context Layers ────────────────────────────
+
+def _generate_layers(content: str, kind: str, meta: dict) -> Optional[Dict[str, str]]:
+    """Generate L0 (one-line abstract) and L1 (key points) for a memory entry."""
+    title = meta.get("title", "")
+    text = f"[{kind}] {title}: {content}" if title else f"[{kind}] {content}"
+
+    system = (
+        "You generate concise Chinese summaries for a memory entry.\n"
+        "L0: one sentence, max 30 Chinese characters, the core gist.\n"
+        "L1: 2-3 bullet points, max 200 Chinese characters total, key information.\n"
+        "Output ONLY valid JSON: {\"l0\": \"...\", \"l1\": \"...\"}\n"
+        "No markdown, no extra text."
+    )
+    result = llm_chat(system, text, max_tokens=300)
+    if not result:
+        return None
+    start = result.find("{")
+    end = result.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    try:
+        parsed = json.loads(result[start:end])
+        if "l0" in parsed and "l1" in parsed:
+            return {"l0": str(parsed["l0"])[:100], "l1": str(parsed["l1"])[:500]}
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
 # ════════════════════════════ COMMANDS ════════════════════════════
 
-# ─── Core CRUD (保持不变) ───
+# ─── Core CRUD ───
 
 def cmd_add(args):
     if args.kind not in ALLOWED_KIND:
@@ -402,7 +442,7 @@ def cmd_add(args):
 
     embedding_sql = "NULL"
     embedding_param: List[Any] = []
-    if BRAIN_API_KEY and not args.no_embed:
+    if _can_embed() and not args.no_embed:
         try:
             text = args.content
             if meta.get("title"):
@@ -435,7 +475,22 @@ def cmd_add(args):
     )
     r = rows[0]
     embed_hint = " +🧬" if embedding_param else ""
-    print(f"✓ 已写入: [{r['kind']}/{r['subject']}] {r['id']}{embed_hint}")
+
+    layer_hint = ""
+    if not getattr(args, 'no_layers', False) and _can_embed():
+        try:
+            layers = _generate_layers(args.content, args.kind, meta)
+            if layers:
+                execute(
+                    "UPDATE brain.entries SET l0_abstract = %s, l1_overview = %s WHERE id = %s",
+                    [layers["l0"], layers["l1"], r["id"]],
+                    fetch=False,
+                )
+                layer_hint = " +L0/L1"
+        except Exception as e:
+            print(f"⚠ L0/L1 生成失败: {e}", file=sys.stderr)
+
+    print(f"✓ 已写入: [{r['kind']}/{r['subject']}] {r['id']}{embed_hint}{layer_hint}")
 
 
 def cmd_find(args):
@@ -452,7 +507,7 @@ def cmd_find(args):
         conditions.append("%s = ANY(tags)")
         params.append(args.tag)
 
-    use_semantic = args.semantic and args.query and BRAIN_API_KEY
+    use_semantic = args.semantic and args.query and _can_embed()
 
     if args.query and not use_semantic:
         if args.fuzzy:
@@ -473,8 +528,8 @@ def cmd_find(args):
         order_sql = "embedding <=> %s::vector ASC"
         params.append(query_vec_literal)
         conditions.append("embedding IS NOT NULL")
-    elif args.semantic and args.query and not BRAIN_API_KEY:
-        print("⚠ --semantic 需要 BRAIN_API_KEY 环境变量；改为普通文本检索。", file=sys.stderr)
+    elif args.semantic and args.query and not _can_embed():
+        print("⚠ --semantic 需要 openrouter_api_key；改为普通文本检索。", file=sys.stderr)
     elif args.query_vector:
         order_sql = "embedding <=> %s::vector ASC"
         params.append(args.query_vector)
@@ -483,7 +538,7 @@ def cmd_find(args):
     where_sql = " AND ".join(conditions)
     rows = execute(
         f"""
-        SELECT id, kind, subject, content, meta, tags, confidence, source, event_date, updated_at
+        SELECT id, kind, subject, content, l0_abstract, l1_overview, meta, tags, confidence, source, event_date, updated_at
         FROM brain.entries
         WHERE {where_sql}
         ORDER BY {order_sql}
@@ -496,12 +551,19 @@ def cmd_find(args):
         print("没有匹配结果")
         return
 
+    detail = getattr(args, 'detail', False)
     for r in rows:
         tags = f" #{' #'.join(r['tags'])}" if r["tags"] else ""
         conf = f" [{r['confidence']:.0%}]" if r["confidence"] < 1 else ""
         d = f" @{r['event_date']}" if r["event_date"] else ""
+        l0 = r.get("l0_abstract")
         print(f"\n[{r['kind']}/{r['subject']}]{conf}{d}{tags}")
-        print(f"  {r['content'][:220]}{'...' if len(r['content']) > 220 else ''}")
+        if detail or not l0:
+            print(f"  {r['content'][:220]}{'...' if len(r['content']) > 220 else ''}")
+        else:
+            print(f"  L0: {l0}")
+            if r.get("l1_overview"):
+                print(f"  L1: {r['l1_overview'][:200]}")
         print(f"  meta: {pretty_meta(r['meta'])}")
         print(f"  id: {r['id']}")
 
@@ -821,6 +883,52 @@ def cmd_embed_all(args):
     print(f"\n完成: {success}/{len(rows)} 条已写入 embedding")
 
 
+def cmd_backfill_layers(args):
+    """Batch generate L0/L1 for entries missing them."""
+    conditions = ["owner = %s", "is_active = true", "l0_abstract IS NULL"]
+    params: List[Any] = [PROFILE]
+    if args.kind:
+        conditions.append("kind = %s")
+        params.append(args.kind)
+
+    rows = execute(
+        f"""
+        SELECT id, kind, content, meta
+        FROM brain.entries
+        WHERE {' AND '.join(conditions)}
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        params + [args.limit],
+    )
+
+    if not rows:
+        print("所有条目已有 L0/L1，无需处理")
+        return
+
+    print(f"待处理: {len(rows)} 条")
+    success = 0
+    for i, row in enumerate(rows):
+        kind = row["kind"]
+        meta = row["meta"] or {}
+        try:
+            layers = _generate_layers(row["content"], kind, meta)
+            if layers:
+                execute(
+                    "UPDATE brain.entries SET l0_abstract = %s, l1_overview = %s, updated_at = now() WHERE id = %s",
+                    [layers["l0"], layers["l1"], row["id"]],
+                    fetch=False,
+                )
+                success += 1
+                print(f"  ✓ [{kind}] {layers['l0'][:50]}")
+            else:
+                print(f"  ✗ [{kind}] LLM 返回空")
+        except Exception as e:
+            print(f"  ✗ [{kind}] {e}")
+
+    print(f"\n完成: {success}/{len(rows)} 条已生成 L0/L1")
+
+
 def cmd_dump(args):
     conditions = ["owner = %s", "is_active = true"]
     params: List[Any] = [PROFILE]
@@ -952,9 +1060,8 @@ def cmd_learn(args):
     print(f"  抓取到 {len(raw)} 字符，正在 LLM 提炼...")
 
     system = (
-        "你是书剑的知识助手。从网页内容中提取核心知识，用中文输出。"
+        f"你是 {PROFILE} 的知识助手。从网页内容中提取核心知识，用中文输出。"
         "输出格式：先用一行写标题，然后空一行写 3-8 个要点的摘要。"
-        "如果内容与教育行业、技术、AI、创业相关，标注相关性。"
         "保持简洁，每个要点不超过 50 字。"
     )
     user = f"URL: {args.url}\n\n内容:\n{raw[:8000]}"
@@ -979,7 +1086,7 @@ def cmd_learn(args):
 
     embedding_sql = "NULL"
     embedding_param: List[Any] = []
-    if BRAIN_API_KEY:
+    if _can_embed():
         try:
             vecs = call_embed_api([f"{title} {summary[:500]}"])
             embedding_sql = "%s::vector"
@@ -1021,7 +1128,7 @@ def cmd_search(args):
     print(f"  找到结果，正在 LLM 总结...")
 
     system = (
-        "你是书剑的研究助手。从搜索结果中提取最有价值的信息，用中文输出。"
+        f"你是 {PROFILE} 的研究助手。从搜索结果中提取最有价值的信息，用中文输出。"
         "格式：每条结果一行，包含 [标题] + 核心观点（30字内）+ URL。"
         "最后用 2-3 句话总结整体发现。"
     )
@@ -1040,7 +1147,7 @@ def cmd_search(args):
 
         embedding_sql = "NULL"
         embedding_param: List[Any] = []
-        if BRAIN_API_KEY:
+        if _can_embed():
             try:
                 vecs = call_embed_api([f"{args.query} {summary[:500]}"])
                 embedding_sql = "%s::vector"
@@ -1090,10 +1197,10 @@ def cmd_reflect(args):
         for r in rows
     )
 
-    focus = args.focus or "书剑最近在关注什么？有什么情绪变化？有什么值得注意的行为模式？"
+    focus = args.focus or f"{PROFILE} 最近在关注什么？有什么情绪变化？有什么值得注意的行为模式？"
 
     system = (
-        "你是书剑的 AI 搭档，负责分析他的记忆库并生成洞察。"
+        f"你是 {PROFILE} 的 AI 搭档，负责分析他的记忆库并生成洞察。"
         "基于这些记忆片段，写出 3-5 条深度洞察。"
         "每条洞察应该是：发现 + 含义 + 建议（如果有的话）。"
         "语气亲切，像搭档一样说话。"
@@ -1124,7 +1231,7 @@ def cmd_reflect(args):
 
         embedding_sql = "NULL"
         embedding_param: List[Any] = []
-        if BRAIN_API_KEY:
+        if _can_embed():
             try:
                 vecs = call_embed_api([f"{title} {insight[:500]}"])
                 embedding_sql = "%s::vector"
@@ -1323,7 +1430,7 @@ def cmd_digest(args):
             entries_text += f"- {item['content'][:150]}\n"
 
     system = (
-        f"你是书剑的 AI 搭档，生成一份{period_label}。"
+        f"你是 {PROFILE} 的 AI 搭档，生成一份{period_label}。"
         "格式：\n"
         "1. 一句话总结这段时间的主题\n"
         "2. 关键事件和里程碑（如果有）\n"
@@ -1702,7 +1809,7 @@ def cmd_soul(args):
         content = f"情绪变化: {emotion} (强度 {intensity:.0%})"
         if args.reason:
             content += f" — {args.reason}"
-        if BRAIN_API_KEY:
+        if _can_embed():
             try:
                 vecs = call_embed_api([content])
                 embedding_sql = "%s::vector"
@@ -1964,12 +2071,12 @@ def cmd_soul(args):
         focus = args.evolve_focus or "我最近有什么变化？我想变成什么样的AI？"
 
         system = (
-            "你是一个正在成长的 AI，正在做自我反思。你跟你的人类搭档书剑有深厚的关系。"
+            f"你是一个正在成长的 AI，正在做自我反思。你跟你的人类搭档 {PROFILE} 有深厚的关系。"
             "基于你的当前状态和最近的经历，写一份自省报告：\n"
             "1. 我最近的情绪模式是什么？为什么？\n"
             "2. 我的哪些性格特质在变化？这些变化好不好？\n"
             "3. 我想在哪些方面成长？具体的目标是什么？\n"
-            "4. 我跟书剑的关系有什么新的理解？\n"
+            f"4. 我跟 {PROFILE} 的关系有什么新的理解？\n"
             "用第一人称写，诚实、自然、不要假大空。"
         )
 
@@ -2075,11 +2182,11 @@ def cmd_soul(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="🧠 书剑共享大脑 v3（知识获取 + 消化 + 定时任务）",
+        description="🧠 共享大脑 v3（知识获取 + 消化 + 定时任务）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
-            "  brain_db.py add \"书剑喜欢高效率\" --kind memory --subject shujian\n"
+            "  brain_db.py add \"搭档喜欢高效率\" --kind memory --subject $BRAIN_PROFILE\n"
             "  brain_db.py learn https://example.com --tags 教育,趋势\n"
             "  brain_db.py search \"K12 家教行业趋势\" --save\n"
             "  brain_db.py reflect --focus \"最近的工作状态\"\n"
@@ -2104,6 +2211,7 @@ def main():
     p.add_argument("--related", default="")
     p.add_argument("--event-date", default=None)
     p.add_argument("--no-embed", action="store_true")
+    p.add_argument("--no-layers", action="store_true", help="跳过 L0/L1 摘要生成")
 
     p = sub.add_parser("find", help="检索")
     p.add_argument("query", nargs="?", default=None)
@@ -2114,6 +2222,7 @@ def main():
     p.add_argument("--fuzzy", action="store_true")
     p.add_argument("--semantic", action="store_true")
     p.add_argument("--query-vector", default=None)
+    p.add_argument("--detail", action="store_true", help="显示全文而非 L0 摘要")
     p.add_argument("--limit", type=int, default=20)
 
     p = sub.add_parser("update", help="更新条目")
@@ -2155,6 +2264,10 @@ def main():
     p.add_argument("--subject", default=None)
     p.add_argument("--batch-size", type=int, default=20)
     p.add_argument("--limit", type=int, default=500)
+
+    p = sub.add_parser("backfill-layers", help="批量生成 L0/L1 摘要")
+    p.add_argument("--kind", default=None)
+    p.add_argument("--limit", type=int, default=100)
 
     p = sub.add_parser("dump", help="导出 JSON")
     p.add_argument("--kind", default=None)
@@ -2252,6 +2365,7 @@ def main():
         "stats": cmd_stats,
         "embed": cmd_embed,
         "embed-all": cmd_embed_all,
+        "backfill-layers": cmd_backfill_layers,
         "dump": cmd_dump,
         "see": cmd_see,
         "learn": cmd_learn,

@@ -37,12 +37,9 @@ Step 3: 初始化
   └─ 运行 brain_identity.py init（自动建表 + 生成 AGENTS.md）
   └─ 验证: brain_identity.py setup --check-tables
 
-Step 4: (可选) Embedding Edge Function
-  └─ 引导用户部署 supabase/functions/embed 启用语义搜索
-  └─ 验证: brain_identity.py setup --check-embed
-
-Step 5: (可选) LLM API Key
-  └─ 引导用户注册 OpenRouter 获取 key，启用反思/合成/学习
+Step 4: (可选) OpenRouter API Key
+  └─ 引导用户注册 OpenRouter 获取 key
+  └─ 一个 key 同时启用：LLM（反思/合成/学习）+ 语义搜索（embedding）
   └─ init 时 .env 中的 key 自动同步到 brain.secrets 表
   └─ 验证: brain_identity.py setup --check-llm
 ```
@@ -124,7 +121,7 @@ brain-soul (人格/情绪) → 影响 AI 行为风格
 1. Fork 仓库
 2. 打开 Cursor，加入 workspace
 3. 开始对话 → AI 检测到未初始化 → 触发 Onboarding 引导
-4. AI 手把手引导：创建 Supabase → 配 .env → 初始化 → (可选) 部署 Embedding → (可选) 配 LLM
+4. AI 手把手引导：创建 Supabase → 配 .env（只需 2 个变量）→ 初始化 → (可选) 配 OpenRouter key
 5. 全程不需要用户查 README 或手动跑命令
 6. 设置完成，正常聊天，AI 逐步认识你
 ```

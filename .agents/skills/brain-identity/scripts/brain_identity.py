@@ -79,6 +79,7 @@ SCHEMA_DIR = BRAIN_ROOT / "schema"
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 LLM_MODEL = os.environ.get("LLM_MODEL", "google/gemini-2.5-flash")
 
+
 IDENTITY_SECTIONS = [
     "about-human",
     "about-ai",
@@ -526,9 +527,6 @@ def cmd_init(args):
     print(f"  ✅ {len(content.splitlines())} 行")
 
     # Summary
-    embed_url = os.environ.get("BRAIN_EMBED_URL", "")
-    embed_key = os.environ.get("BRAIN_API_KEY", "")
-
     print("\n" + "━" * 40)
     print(f"🎉 大脑初始化完成！Profile: {profile}")
     print()
@@ -538,15 +536,11 @@ def cmd_init(args):
     print("    ✅ 身份系统 — brain_identity.py generate/update/synthesize")
     if has_llm:
         print("    ✅ 知识获取 — brain_db.py learn/search/reflect")
-    if embed_url and embed_key:
         print("    ✅ 语义搜索 — brain_db.py find --semantic")
     print()
-    if not has_llm or not (embed_url and embed_key):
+    if not has_llm:
         print("  可选功能（未配置）:")
-        if not has_llm:
-            print("    ⬜ LLM → 配置 OPENROUTER_API_KEY 启用反思/合成/学习")
-        if not (embed_url and embed_key):
-            print("    ⬜ Embedding → 部署 supabase/functions/embed 启用语义搜索")
+        print("    ⬜ OpenRouter → 配置 OPENROUTER_API_KEY 启用 LLM + 语义搜索")
         print()
     print("  现在可以开始对话了。AI 会逐步了解你。")
 
@@ -809,31 +803,12 @@ def cmd_setup(args):
                 pass
             _print_check("brain.ai_state 表", ai_state_ok, "不存在 → 运行 brain_identity.py init")
 
-    # Embedding
-    embed_ok = False
-    if not check_specific or args.check_embed:
-        embed_url = os.environ.get("BRAIN_EMBED_URL", "")
-        embed_key = os.environ.get("BRAIN_API_KEY", "")
-        if embed_url and embed_key:
-            try:
-                payload = json.dumps({"input": ["test"]}).encode("utf-8")
-                req = urllib.request.Request(
-                    embed_url, data=payload,
-                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {embed_key}"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    embed_ok = resp.status == 200
-            except Exception:
-                pass
-        _print_check("Embedding (语义搜索)", embed_ok, "未配置（可选）→ 部署 supabase/functions/embed")
-
-    # LLM
+    # OpenRouter (LLM + Embedding 共用)
     llm_ok = False
-    if not check_specific or args.check_llm:
-        llm_key = os.environ.get("OPENROUTER_API_KEY") or _get_secret("openrouter_api_key") if db_ok else os.environ.get("OPENROUTER_API_KEY")
+    if not check_specific or args.check_embed or args.check_llm:
+        llm_key = os.environ.get("OPENROUTER_API_KEY") or (_get_secret("openrouter_api_key") if db_ok else None)
         llm_ok = bool(llm_key)
-        _print_check("LLM API Key (反思/合成)", llm_ok, "未配置（可选）→ 注册 openrouter.ai 获取 key")
+        _print_check("OpenRouter API Key (LLM + 语义搜索)", llm_ok, "未配置（可选）→ 注册 openrouter.ai 获取 key")
 
     # AGENTS.md
     agents_ok = False
