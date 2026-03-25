@@ -76,6 +76,11 @@
       "sourceType": "github",
       "computedHash": "7ad2499be7047831977dd1408af55d0f326d9aaf685ca37a6153cb886c4d0971"
     },
+    "opencli": {
+      "source": "joeseesun/opencli-skill",
+      "sourceType": "github",
+      "computedHash": "8593fd00785b896ec8f9b15adb3d82bcc01cb605b426ac3e76db86135898dd11"
+    },
     "optimize": {
       "source": "pbakaus/impeccable",
       "sourceType": "github",
